@@ -24,12 +24,14 @@ DECLARE_WAIT_QUEUE_HEAD(writeQ);
 struct semaphore sem;
 
 
-uint fifo[16];
+uint fifo[50];
 int el_in_fifo = 0;
 int endRead = 0;
 
 int fful=0;
 int fempty=0;
+int flag=0;
+int n=0;
 
 
 int fifo_open(struct inode *pinode, struct file *pfile);
@@ -66,42 +68,45 @@ ssize_t fifo_read(struct file *pfile, char __user *buffer, size_t length, loff_t
 	char buff[BUFF_SIZE];
 	long int len = 0;
 	if (endRead){
-		endRead = 0;
-		return 0;
+	  endRead = 0;
+	  return 0;
 	}
 
 	if(down_interruptible(&sem))
 	  return -ERESTARTSYS;
-
-	        
-	len = scnprintf(buff, BUFF_SIZE, "%x ", fifo[fful]);
-	ret = copy_to_user(buffer, buff, len);
-	if(ret)
-	  return -EFAULT;
-	printk(KERN_INFO "Succesfully read\n");
-	endRead = 1;
-	fful++;
-
-	el_in_fifo--;
-
+	
 	while (el_in_fifo == 0) {
-	                                                              //Oslobadja semafor i ceka budjenje dok se ne oslobodi mesto u baferu
+	  printk(KERN_WARNING "Usao je u red cekanja za ispis zbog el=0");    
 	  up(&sem);
 	  if(wait_event_interruptible(writeQ, (el_in_fifo > 0)))
 	    return -ERESTARTSYS;
 	  if(down_interruptible(&sem))
 	    return -ERESTARTSYS;
 	}
-	
-	if(fful==16 ){
+
+	if(flag){
+	  len = scnprintf(buff, BUFF_SIZE, "%d ", fifo[fful]);
+	}
+	else{
+	  len = scnprintf(buff, BUFF_SIZE, "0x%x ", fifo[fful]);
+	}
+	ret = copy_to_user(buffer, buff, len);
+	if(ret)
+	  return -EFAULT;
+	printk(KERN_INFO "Succesfully read\n");
+	if(n>0)
+	  n--;
+	if(n==0)
+	  endRead = 1;
+	fful++;
+	if(fful==50){
 	  fful=0;
 	}
+
+	el_in_fifo--;
 		
        	up(&sem);
 	wake_up_interruptible(&writeQ);
-
-	
-
 
 	return len;
 }
@@ -111,7 +116,8 @@ ssize_t fifo_write(struct file *pfile, const char __user *buffer, size_t length,
 {
 	char buff[BUFF_SIZE];
 	char buff_new[BUFF_SIZE];     
-	int ret,i,i_count=0;
+	int ret,done,i,i_count=0;
+	size_t l;
 
 	ret = copy_from_user(buff, buffer, length);
 	if(ret)
@@ -122,43 +128,56 @@ ssize_t fifo_write(struct file *pfile, const char __user *buffer, size_t length,
 	if(down_interruptible(&sem))
 	  return -ERESTARTSYS;
 	
-       	strreplace(buff,',','\0');
-	
-	for(i=0;i<=length;i++){
-	  i_count++;
-	  if(buff[i]=='\0' ){
-	    strncpy(buff_new,buff+i-i_count+1,i_count); 
-	    kstrtouint(buff_new, 16, &fifo[fempty]);
-	    i_count=0;
-	    fempty++;
-	    
-	    el_in_fifo++;
-	    
-	    if(fempty==16){
-	      fempty=0;
-	    }
+       	strreplace(buff,',','\0');	
 
-	     while (el_in_fifo == 16) {
-	                                                              //sem
-	       up(&sem);
-	       if(wait_event_interruptible(writeQ, (el_in_fifo < 16)))
-		 return -ERESTARTSYS;
-	       if(down_interruptible(&sem))
-		 return -ERESTARTSYS;
-	     }
-	    
-	  }
+	if(strncmp(buff,"dec\0,",4)==0){
+	  flag=1;
+	   printk(KERN_WARNING "Promenjena nacin ispisa u dec format");
 	}
-	
+	else if(strncmp(buff,"hex\0,",4)==0){
+	   printk(KERN_WARNING "Vracen nacin ispisa u hex format");
+	  flag=0;
+	}
+	else if(strncmp(buff,"num=",4)==0){
+	  l=strnlen(buff,7);
+	  if(l==5)
+	    strncpy(buff_new,buff+4,2);
+	  if(l==6)
+	    strncpy(buff_new,buff+4,3);
+	  kstrtouint(buff_new, 10, &n);
+	  printk(KERN_WARNING "Pronasao je duzinu  n=%d koju treba da ispise",n);
+	}
+	else{
+	  for(i=0;i<=length;i++){
+	    i_count++;	  
+	    if(buff[i]=='\0' ){
+	      strncpy(buff_new,buff+i-i_count+1,i_count); 
+	      done = kstrtouint(buff_new, 16, &fifo[fempty]);
+	      if(done==0)
+		printk(KERN_WARNING "Uspesno je upisao");
+	      if(i_count>2)
+		printk(KERN_WARNING "Pogresan unos broja");
+	      i_count=0;
+	      fempty++;	    
+	      el_in_fifo++;
+	      if(fempty==50){
+		fempty=0;
+	      }
 
-	
+	      while (el_in_fifo == 16) {
+		printk(KERN_WARNING "Usao je u red cekanja za upis zbog el_in_fifo == 16"); 
+		up(&sem);
+		if(wait_event_interruptible(writeQ, (el_in_fifo < 16)))
+		  return -ERESTARTSYS;
+		if(down_interruptible(&sem))
+		  return -ERESTARTSYS;
+	      }	    
+	    }
+	  }
+	} 	
 	up(&sem);
 	wake_up_interruptible(&readQ);
-	
-	//	printk(KERN_WARNING "fempty=%d fful=%d  ",fempty,fful);
-
-
-	
+		
 	return length;
 }
 
@@ -171,7 +190,7 @@ static int __init fifo_init(void)
 	sema_init(&sem,1);
 
 	//Initialize array
-	for (i=0; i<16; i++)
+	for (i=0; i<50; i++)
 		fifo[i] = 0;
 
    ret = alloc_chrdev_region(&my_dev_id, 0, 1, "fifo");
